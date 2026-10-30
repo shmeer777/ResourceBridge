@@ -24,3 +24,4 @@ Set these in your Hugging Face Space Settings under **Variables and secrets**:
 - `JWT_SECRET_KEY`: A strong random string for signing JWT authentication tokens
 - `FRONTEND_ORIGIN`: Your Cloudflare Pages URL (e.g. `https://resourcebridge.pages.dev`)
 - `CORS_ORIGINS`: Comma-separated list of allowed origins (e.g. `https://resourcebridge.pages.dev,http://localhost:5173`)
+

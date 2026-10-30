@@ -2,7 +2,7 @@
 
 This guide details the complete deployment setup for ResourceBridge:
 - **Frontend**: Cloudflare Pages (React + Vite + TypeScript)
-- **Backend**: Hugging Face Spaces (FastAPI + Docker) or Render
+- **Backend**: Google Cloud Run (FastAPI + Docker)
 - **Database**: Supabase PostgreSQL
 
 ---
@@ -14,67 +14,83 @@ Ensure you have your Connection String handy:
 ```text
 postgresql+psycopg://postgres:[YOUR-PASSWORD]@[YOUR-DB-HOST]:5432/postgres
 ```
-*(Or use Transaction Pooler port 6543 if your network requires IPv4 compatibility)*
+*(Tip: When connecting from serverless environments like Cloud Run, using the Supabase Connection Pooler hostname `aws-0-[region].pooler.supabase.com` on port `5432` (Session mode) or `6543` (Transaction mode) ensures reliable IPv4 resolution).*
 
 ---
 
-## 2. Backend Deployment (Hugging Face Spaces)
+## 2. Backend Deployment (Google Cloud Run)
 
-Hugging Face Spaces provides a free Docker hosting tier with 2 vCPUs and 16 GB RAM.
+Google Cloud Run provides an **Always Free** tier that includes:
+- **2,000,000 requests** per month
+- **180,000 vCPU-seconds** per month
+- **360,000 GiB-seconds** per month
+- **1 GB egress** per month
+- Automatic scale-to-zero when idle (0 cost during inactivity)
 
-### Step 2.1: Create a New Space
-1. Log in to [huggingface.co](https://huggingface.co/) (create a free account if you don't have one).
-2. Click your profile avatar -> **New Space** (or visit [huggingface.co/new-space](https://huggingface.co/new-space)).
-3. Fill in:
-   - **Space name**: `resourcebridge-api`
-   - **License**: `mit` (or choose your preferred license)
-   - **Space SDK**: Select **Docker** -> **Blank**
-   - **Space hardware**: `Free - 2 vCPU · 16GB`
-   - **Visibility**: `Public` (required for free tier web endpoints)
-4. Click **Create Space**.
+### Deployment Option A: Cloud Run Console (Recommended — No CLI Needed)
 
-### Step 2.2: Configure Environment Variables & Secrets
-In your newly created Space:
-1. Go to **Settings** -> **Variables and secrets**.
-2. Under **Secrets** (New secret), add:
-   - `DATABASE_URL`: `postgresql+psycopg://postgres:[PASSWORD]@[HOST]:[PORT]/postgres`
-   - `JWT_SECRET_KEY`: A strong 64+ character random string
-3. Under **Variables** (New variable), add:
-   - `CORS_ORIGINS`: `https://*.pages.dev,http://localhost:5173`
-   - `FRONTEND_ORIGIN`: `https://resourcebridge.pages.dev`
+1. Open the [Google Cloud Console Cloud Run Page](https://console.cloud.google.com/run).
+2. Select your Google Cloud Project (or create a new project with billing enabled).
+3. Click **Create Service** (or **Deploy Container**).
+4. Select **Continuously deploy from a repository** and click **Set up Cloud Build**:
+   - Provider: **GitHub**
+   - Repository: `shmeer777/ResourceBridge`
+   - Branch: `^main$`
+   - Build Type: **Dockerfile**
+   - Source directory: `/backend`
+   - Dockerfile path: `Dockerfile`
+5. Service configuration:
+   - **Service name**: `resourcebridge-api`
+   - **Region**: Choose a region close to you (e.g. `us-central1`, `asia-south1`, etc.)
+   - **Authentication**: Select **Allow unauthenticated invocations** (public API)
+6. Under **Container, Volumes, Networking, Security** -> **Container**:
+   - **Container port**: `8080`
+   - **Capacity**: Memory `512 MiB` (or `1 GiB`), CPU `1`
+   - **Environment variables**:
+     - `DATABASE_URL`: `postgresql+psycopg://postgres:[PASSWORD]@[HOST]:[PORT]/postgres`
+     - `JWT_SECRET_KEY`: A strong 64+ character random string
+     - `CORS_ORIGINS`: `https://*.pages.dev,http://localhost:5173`
+     - `FRONTEND_ORIGIN`: `https://resourcebridge.pages.dev`
+7. Click **Create**.
+8. Cloud Build will automatically build the container and deploy the service. Note the assigned service URL: `https://resourcebridge-api-xxxxxx.a.run.app`.
 
-### Step 2.3: Push the Backend to the Space
-You can push the backend directly from your local terminal using Git:
+### Deployment Option B: Google Cloud CLI (`gcloud`)
+
+If you have `gcloud` installed locally:
 
 ```bash
-# Add Hugging Face Space as a remote (replace <hf-username> with your HF username)
-git remote add hf https://huggingface.co/spaces/<hf-username>/resourcebridge-api
+# 1. Log in and configure your project
+gcloud auth login
+gcloud config set project YOUR_PROJECT_ID
 
-# Push the backend directory to the Space's main branch
-git subtree push --prefix backend hf main
+# 2. Deploy directly from the backend source folder
+gcloud run deploy resourcebridge-api \
+  --source ./backend \
+  --region us-central1 \
+  --allow-unauthenticated \
+  --port 8080 \
+  --set-env-vars DATABASE_URL="YOUR_SUPABASE_URL",JWT_SECRET_KEY="YOUR_SECRET",CORS_ORIGINS="https://*.pages.dev,http://localhost:5173"
 ```
-*Note: When Git prompts for a password, enter your Hugging Face Access Token (generated at https://huggingface.co/settings/tokens with write permissions).*
 
-### Step 2.4: Verify the Backend
-Once built, test the endpoints in your browser:
-- `https://<hf-username>-resourcebridge-api.hf.space/health` -> `{"status":"ok",...}`
-- `https://<hf-username>-resourcebridge-api.hf.space/docs` -> Interactive Swagger UI
+### Backend Health Check Verification
+Once deployed, verify in your browser or curl:
+- `https://<YOUR-CLOUD-RUN-URL>/health` -> `{"status":"ok",...}`
+- `https://<YOUR-CLOUD-RUN-URL>/docs` -> Interactive Swagger API documentation
 
 ---
 
 ## 3. Frontend Deployment (Cloudflare Pages)
 
-Cloudflare Pages provides free, unlimited bandwidth, instant global CDN hosting with automatic Git CI/CD.
+Cloudflare Pages provides free hosting with unlimited bandwidth, global CDN caching, and automatic continuous deployment on every Git push.
 
 ### Step 3.1: Connect Your GitHub Repository
 1. Log in to [dash.cloudflare.com](https://dash.cloudflare.com/).
-2. In the sidebar, navigate to **Workers & Pages**.
+2. Navigate to **Workers & Pages** in the sidebar.
 3. Click **Create application** -> **Pages** tab -> **Connect to Git**.
 4. Select `shmeer777/ResourceBridge`.
 
 ### Step 3.2: Set Up Build Configuration
-Configure the build settings as follows:
-- **Project name**: `resourcebridge` (or any name you prefer)
+- **Project name**: `resourcebridge`
 - **Production branch**: `main`
 - **Framework preset**: `Vite`
 - **Root directory**: `frontend`
@@ -83,25 +99,24 @@ Configure the build settings as follows:
 
 ### Step 3.3: Set Environment Variables
 Under **Environment variables (advanced)** -> Add variable:
-- Variable name: `VITE_API_BASE_URL`
-- Value: `https://<hf-username>-resourcebridge-api.hf.space/api/v1`
+- **Variable name**: `VITE_API_BASE_URL`
+- **Value**: `https://<YOUR-CLOUD-RUN-URL>/api/v1`
 
-*(Replace `<hf-username>` with your actual Hugging Face username, or use your deployed backend API URL)*
+*(Example: `https://resourcebridge-api-xyz-uc.a.run.app/api/v1`)*
 
 ### Step 3.4: Deploy & Verify
 1. Click **Save and Deploy**.
-2. Cloudflare will install dependencies, run `npm run build`, and deploy the production bundle to `https://resourcebridge.pages.dev` (or your assigned subdomain).
-3. The included `_redirects` file (`/* /index.html 200`) ensures client-side routes like `/role-selection`, `/login/provider`, and `/provider/dashboard` reload cleanly.
+2. Cloudflare will install dependencies, compile the TypeScript bundle (`npm run build`), and deploy to `https://resourcebridge.pages.dev`.
+3. The included `_redirects` file (`/* /index.html 200`) ensures client-side routing on page refresh works seamlessly.
 
 ---
 
-## 4. End-to-End Verification Checklist
+## 4. End-to-End Live Verification Checklist
 
-Once both services are deployed:
-- [ ] Visit the Cloudflare Pages URL: `https://<project-name>.pages.dev`
-- [ ] Test Navigation: Explore Resources, How It Works, Role Selection
-- [ ] Test Seeker Flow: Register a new Seeker or sign in with demo credentials
-- [ ] Test Provider Flow: Sign in with demo Provider credentials, view My Resources
-- [ ] Test Resource Creation: Create a test resource and check its public discovery
-- [ ] Test Booking Request: Seeker submits a booking inquiry; Provider receives and approves/rejects
-- [ ] Test Messaging: Open conversation thread on the booking request and exchange messages
+Once both services are running:
+1. **Public Discovery**: Visit `https://resourcebridge.pages.dev/explore` and verify active resources load from Supabase.
+2. **Seeker Registration & Login**: Create a new seeker account and log in.
+3. **Provider Login & Dashboard**: Log in using provider credentials and verify listed resources.
+4. **Booking Flow**: As a seeker, submit a booking inquiry for an available resource.
+5. **Provider Decision**: As provider, view the pending request, accept or reject it.
+6. **Messaging System**: Open the booking conversation modal and exchange messages in real time.
