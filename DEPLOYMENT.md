@@ -16,6 +16,21 @@ postgresql+psycopg://postgres:[YOUR-PASSWORD]@[YOUR-DB-HOST]:5432/postgres
 ```
 *(Tip: When connecting from serverless environments like Cloud Run, using the Supabase Connection Pooler hostname `aws-0-[region].pooler.supabase.com` on port `5432` (Session mode) or `6543` (Transaction mode) ensures reliable IPv4 resolution).*
 
+### Safe Migration Procedure
+To prevent migration race conditions or table locks when Cloud Run autoscales multiple container instances, automatic migration execution on container startup is disabled by default (`RUN_MIGRATIONS_ON_STARTUP=False`).
+
+Run migrations explicitly once prior to or during deployment:
+
+```bash
+# From your development machine or CI/CD pipeline:
+cd backend
+$env:DATABASE_URL="postgresql+psycopg://postgres:[YOUR-PASSWORD]@[YOUR-DB-HOST]:5432/postgres"
+alembic upgrade head
+```
+*(On Linux/macOS, use `export DATABASE_URL=...` instead of `$env:DATABASE_URL=...`).*
+
+Alembic will inspect the `alembic_version` table in Supabase and only apply new revisions non-destructively.
+
 ---
 
 ## 2. Backend Deployment (Google Cloud Run)
@@ -45,14 +60,16 @@ Google Cloud Run provides an **Always Free** tier that includes:
    - **Authentication**: Select **Allow unauthenticated invocations** (public API)
 6. Under **Container, Volumes, Networking, Security** -> **Container**:
    - **Container port**: `8080`
-   - **Capacity**: Memory `512 MiB` (or `1 GiB`), CPU `1`
+   - **Capacity**: Memory `512 MiB`, CPU `1`
    - **Environment variables**:
+     - `ENVIRONMENT`: `production`
      - `DATABASE_URL`: `postgresql+psycopg://postgres:[PASSWORD]@[HOST]:[PORT]/postgres`
      - `JWT_SECRET_KEY`: A strong 64+ character random string
-     - `CORS_ORIGINS`: `https://*.pages.dev,http://localhost:5173`
-     - `FRONTEND_ORIGIN`: `https://resourcebridge.pages.dev`
+     - `CORS_ORIGINS`: `https://resourcebridge.pages.dev`
+     - `DB_POOL_SIZE`: `3`
+     - `DB_MAX_OVERFLOW`: `2`
 7. Click **Create**.
-8. Cloud Build will automatically build the container and deploy the service. Note the assigned service URL: `https://resourcebridge-api-xxxxxx.a.run.app`.
+8. Cloud Build will build the container and deploy the service. Note the assigned service URL: `https://resourcebridge-api-xxxxxx.a.run.app`.
 
 ### Deployment Option B: Google Cloud CLI (`gcloud`)
 
@@ -69,12 +86,13 @@ gcloud run deploy resourcebridge-api \
   --region us-central1 \
   --allow-unauthenticated \
   --port 8080 \
-  --set-env-vars DATABASE_URL="YOUR_SUPABASE_URL",JWT_SECRET_KEY="YOUR_SECRET",CORS_ORIGINS="https://*.pages.dev,http://localhost:5173"
+  --set-env-vars ENVIRONMENT="production",DATABASE_URL="YOUR_SUPABASE_URL",JWT_SECRET_KEY="YOUR_SECRET",CORS_ORIGINS="https://resourcebridge.pages.dev",DB_POOL_SIZE="3",DB_MAX_OVERFLOW="2"
 ```
 
 ### Backend Health Check Verification
 Once deployed, verify in your browser or curl:
-- `https://<YOUR-CLOUD-RUN-URL>/health` -> `{"status":"ok",...}`
+- `https://<YOUR-CLOUD-RUN-URL>/health/live` -> Liveness (process running)
+- `https://<YOUR-CLOUD-RUN-URL>/health/ready` -> Readiness (database connection verified)
 - `https://<YOUR-CLOUD-RUN-URL>/docs` -> Interactive Swagger API documentation
 
 ---
