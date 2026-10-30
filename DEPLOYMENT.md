@@ -1,140 +1,144 @@
-# ResourceBridge — Production Deployment Guide
+# ResourceBridge — Complete Production Deployment Guide
 
-This guide details the complete deployment setup for ResourceBridge:
-- **Frontend**: Cloudflare Pages (React + Vite + TypeScript)
-- **Backend**: Google Cloud Run (FastAPI + Docker)
-- **Database**: Supabase PostgreSQL
+This guide details the complete zero-billing, free-tier deployment setup for ResourceBridge:
+- **Frontend**: Cloudflare Pages (React + TypeScript + Vite) — Free Plan
+- **Backend**: Render Web Service (FastAPI + Python) — Free Instance
+- **Database**: Supabase PostgreSQL — Existing Free Tier Database
 
 ---
 
-## 1. Database (Supabase PostgreSQL)
+## 1. Hosting Architecture & Free-Tier Characteristics
 
-Your Supabase PostgreSQL database is already configured. 
-Ensure you have your Connection String handy:
-```text
-postgresql+psycopg://postgres:[YOUR-PASSWORD]@[YOUR-DB-HOST]:5432/postgres
-```
-*(Tip: When connecting from serverless environments like Cloud Run, using the Supabase Connection Pooler hostname `aws-0-[region].pooler.supabase.com` on port `5432` (Session mode) or `6543` (Transaction mode) ensures reliable IPv4 resolution).*
+| Component | Platform & Tier | Resource Limits | Cold Start / Inactivity Behavior | Cost |
+| :--- | :--- | :--- | :--- | :--- |
+| **Frontend** | Cloudflare Pages (Free) | Unlimited bandwidth & requests, 500 builds/mo | Instant (Edge CDN, always on) | Free |
+| **Backend** | Render (Free Web Service) | 512 MB RAM, 0.1 vCPU, 750 free instance hrs/mo | Sleeps after 15m inactivity; wakes on request (~30–50s) | Free |
+| **Database** | Supabase (Free Tier) | 500 MB database, shared pooler | Existing database preserved; pauses after 1w inactivity | Free |
 
-### Safe Migration Procedure
-To prevent migration race conditions or table locks when Cloud Run autoscales multiple container instances, automatic migration execution on container startup is disabled by default (`RUN_MIGRATIONS_ON_STARTUP=False`).
+---
 
-Run migrations explicitly once prior to or during deployment:
+## 2. Database (Existing Supabase PostgreSQL)
 
-```bash
-# From your development machine or CI/CD pipeline:
+Your Supabase PostgreSQL database is preserved. Zero tables or data should be dropped or reset.
+
+### Safe Connection String Format
+In the Supabase Dashboard -> **Project Settings** -> **Database** -> **Connection string** -> Select **URI**:
+- Use the **Connection Pooler** URI (recommended for serverless/cloud environments on port `6543` for Transaction mode or `5432` for Session mode):
+  ```text
+  postgresql+psycopg://postgres.[PROJECT-REF]:[YOUR-PASSWORD]@aws-0-[REGION].pooler.supabase.com:6543/postgres
+  ```
+- *Note on driver*: SQLAlchemy with Psycopg 3 uses `postgresql+psycopg://`. If your raw string starts with `postgres://` or `postgresql://`, the application automatically normalizes it to `postgresql+psycopg://`.
+
+### Explicit Migration Procedure
+Automatic database migrations during application startup are disabled (`RUN_MIGRATIONS_ON_STARTUP=false`) to avoid startup delays or conflicts.
+
+If schema migrations are needed in the future, run them explicitly once from your secure administrative machine:
+```powershell
 cd backend
-$env:DATABASE_URL="postgresql+psycopg://postgres:[YOUR-PASSWORD]@[YOUR-DB-HOST]:5432/postgres"
+$env:DATABASE_URL="postgresql+psycopg://postgres.[PROJECT-REF]:[YOUR-PASSWORD]@aws-0-[REGION].pooler.supabase.com:6543/postgres"
 alembic upgrade head
 ```
-*(On Linux/macOS, use `export DATABASE_URL=...` instead of `$env:DATABASE_URL=...`).*
-
-Alembic will inspect the `alembic_version` table in Supabase and only apply new revisions non-destructively.
 
 ---
 
-## 2. Backend Deployment (Google Cloud Run)
+## 3. Backend Deployment (Render Free Web Service)
 
-Google Cloud Run provides an **Always Free** tier that includes:
-- **2,000,000 requests** per month
-- **180,000 vCPU-seconds** per month
-- **360,000 GiB-seconds** per month
-- **1 GB egress** per month
-- Automatic scale-to-zero when idle (0 cost during inactivity)
+### Step 3.1: Create Web Service on Render
+1. Log in to [render.com](https://render.com/) (sign up with GitHub if you do not have an account; no credit card required).
+2. Click **New +** -> **Web Service**.
+3. Select **Build and deploy from a Git repository** -> Choose `shmeer777/ResourceBridge`.
+4. Configure service parameters:
+   - **Name**: `resourcebridge-api`
+   - **Region**: Choose a region close to your Supabase project (e.g. `Oregon (US West)` or `Frankfurt (EU)`)
+   - **Branch**: `main`
+   - **Root Directory**: `backend`
+   - **Runtime**: `Python 3`
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+   - **Instance Type**: `Free`
+5. Click **Advanced** -> Configure:
+   - **Health Check Path**: `/health/live`
+   - **Auto-Deploy**: `Yes`
 
-### Deployment Option A: Cloud Run Console (Recommended — No CLI Needed)
+### Step 3.2: Configure Render Environment Variables
+Under the **Environment** tab, add the following variables:
 
-1. Open the [Google Cloud Console Cloud Run Page](https://console.cloud.google.com/run).
-2. Select your Google Cloud Project (or create a new project with billing enabled).
-3. Click **Create Service** (or **Deploy Container**).
-4. Select **Continuously deploy from a repository** and click **Set up Cloud Build**:
-   - Provider: **GitHub**
-   - Repository: `shmeer777/ResourceBridge`
-   - Branch: `^main$`
-   - Build Type: **Dockerfile**
-   - Source directory: `/backend`
-   - Dockerfile path: `Dockerfile`
-5. Service configuration:
-   - **Service name**: `resourcebridge-api`
-   - **Region**: Choose a region close to you (e.g. `us-central1`, `asia-south1`, etc.)
-   - **Authentication**: Select **Allow unauthenticated invocations** (public API)
-6. Under **Container, Volumes, Networking, Security** -> **Container**:
-   - **Container port**: `8080`
-   - **Capacity**: Memory `512 MiB`, CPU `1`
-   - **Environment variables**:
-     - `ENVIRONMENT`: `production`
-     - `DATABASE_URL`: `postgresql+psycopg://postgres:[PASSWORD]@[HOST]:[PORT]/postgres`
-     - `JWT_SECRET_KEY`: A strong 64+ character random string
-     - `CORS_ORIGINS`: `https://resourcebridge.pages.dev`
-     - `DB_POOL_SIZE`: `3`
-     - `DB_MAX_OVERFLOW`: `2`
-7. Click **Create**.
-8. Cloud Build will build the container and deploy the service. Note the assigned service URL: `https://resourcebridge-api-xxxxxx.a.run.app`.
+| Variable Name | Required Value / Source |
+| :--- | :--- |
+| `ENVIRONMENT` | `production` |
+| `PYTHON_VERSION` | `3.11.9` |
+| `DATABASE_URL` | Your Supabase connection URI (`postgresql+psycopg://...`) |
+| `JWT_SECRET_KEY` | A cryptographically secure random string (minimum 32 characters) |
+| `CORS_ORIGINS` | Temporary placeholder: `https://resourcebridge.pages.dev` *(update after Step 4)* |
+| `DB_POOL_SIZE` | `3` |
+| `DB_MAX_OVERFLOW` | `2` |
+| `DB_POOL_TIMEOUT` | `15` |
+| `DB_POOL_RECYCLE` | `300` |
+| `RUN_MIGRATIONS_ON_STARTUP` | `false` |
 
-### Deployment Option B: Google Cloud CLI (`gcloud`)
-
-If you have `gcloud` installed locally:
-
-```bash
-# 1. Log in and configure your project
-gcloud auth login
-gcloud config set project YOUR_PROJECT_ID
-
-# 2. Deploy directly from the backend source folder
-gcloud run deploy resourcebridge-api \
-  --source ./backend \
-  --region us-central1 \
-  --allow-unauthenticated \
-  --port 8080 \
-  --set-env-vars ENVIRONMENT="production",DATABASE_URL="YOUR_SUPABASE_URL",JWT_SECRET_KEY="YOUR_SECRET",CORS_ORIGINS="https://resourcebridge.pages.dev",DB_POOL_SIZE="3",DB_MAX_OVERFLOW="2"
-```
-
-### Backend Health Check Verification
-Once deployed, verify in your browser or curl:
-- `https://<YOUR-CLOUD-RUN-URL>/health/live` -> Liveness (process running)
-- `https://<YOUR-CLOUD-RUN-URL>/health/ready` -> Readiness (database connection verified)
-- `https://<YOUR-CLOUD-RUN-URL>/docs` -> Interactive Swagger API documentation
+6. Click **Create Web Service**.
+7. Render will build the dependencies and start Uvicorn. Note the assigned URL:
+   `https://resourcebridge-api-xxxx.onrender.com`
 
 ---
 
-## 3. Frontend Deployment (Cloudflare Pages)
+## 4. Frontend Deployment (Cloudflare Pages)
 
-Cloudflare Pages provides free hosting with unlimited bandwidth, global CDN caching, and automatic continuous deployment on every Git push.
-
-### Step 3.1: Connect Your GitHub Repository
+### Step 4.1: Connect Repository to Cloudflare Pages
 1. Log in to [dash.cloudflare.com](https://dash.cloudflare.com/).
-2. Navigate to **Workers & Pages** in the sidebar.
+2. In the sidebar, select **Workers & Pages**.
 3. Click **Create application** -> **Pages** tab -> **Connect to Git**.
-4. Select `shmeer777/ResourceBridge`.
+4. Select repository `shmeer777/ResourceBridge`.
 
-### Step 3.2: Set Up Build Configuration
-- **Project name**: `resourcebridge`
+### Step 4.2: Build Configuration
+Configure the build settings:
+- **Project name**: `resourcebridge` (or your preferred name)
 - **Production branch**: `main`
 - **Framework preset**: `Vite`
 - **Root directory**: `frontend`
-- **Build command**: `npm run build`
+- **Build command**: `npm run build` *(or `npm ci && npm run build`)*
 - **Build output directory**: `dist`
 
-### Step 3.3: Set Environment Variables
+### Step 4.3: Set Frontend Environment Variable
 Under **Environment variables (advanced)** -> Add variable:
 - **Variable name**: `VITE_API_BASE_URL`
-- **Value**: `https://<YOUR-CLOUD-RUN-URL>/api/v1`
+- **Value**: `https://<YOUR-RENDER-URL>.onrender.com/api/v1`
+  *(Crucial: Must include the `/api/v1` path suffix to match the frontend API client)*
 
-*(Example: `https://resourcebridge-api-xyz-uc.a.run.app/api/v1`)*
-
-### Step 3.4: Deploy & Verify
+### Step 4.4: Deploy
 1. Click **Save and Deploy**.
-2. Cloudflare will install dependencies, compile the TypeScript bundle (`npm run build`), and deploy to `https://resourcebridge.pages.dev`.
-3. The included `_redirects` file (`/* /index.html 200`) ensures client-side routing on page refresh works seamlessly.
+2. Cloudflare Pages will build the frontend in ~1–2 minutes and assign your live domain:
+   `https://<project-name>.pages.dev`
 
 ---
 
-## 4. End-to-End Live Verification Checklist
+## 5. Final Step: Lock Down Production CORS
 
-Once both services are running:
-1. **Public Discovery**: Visit `https://resourcebridge.pages.dev/explore` and verify active resources load from Supabase.
-2. **Seeker Registration & Login**: Create a new seeker account and log in.
-3. **Provider Login & Dashboard**: Log in using provider credentials and verify listed resources.
-4. **Booking Flow**: As a seeker, submit a booking inquiry for an available resource.
-5. **Provider Decision**: As provider, view the pending request, accept or reject it.
-6. **Messaging System**: Open the booking conversation modal and exchange messages in real time.
+Once Cloudflare Pages deploys and you have your exact assigned domain (e.g. `https://resourcebridge-abc.pages.dev`):
+
+1. Go back to your [Render Dashboard](https://dashboard.render.com/) -> Select `resourcebridge-api`.
+2. Go to **Environment** tab.
+3. Edit `CORS_ORIGINS` to match your exact Cloudflare Pages origin:
+   ```text
+   CORS_ORIGINS = https://<your-project-name>.pages.dev
+   ```
+4. Click **Save Changes**. Render will automatically trigger a zero-downtime redeploy with the updated CORS configuration.
+
+---
+
+## 6. Post-Deployment Verification
+
+### Backend Verification
+- Liveness check (process alive):
+  `https://<your-backend>.onrender.com/health/live` -> `{"status":"alive",...}`
+- Database readiness check (Supabase connectivity verified):
+  `https://<your-backend>.onrender.com/health/ready` -> `{"status":"ready","database":"connected",...}`
+- Swagger documentation:
+  `https://<your-backend>.onrender.com/docs`
+
+### Frontend Verification
+- Open `https://<your-project-name>.pages.dev`
+- Verify homepage loads and navigation routes work.
+- Reload sub-routes (e.g. `/role-selection`) to verify SPA `_redirects` routing.
+- Test Seeker/Provider login and registration.
+- Verify resources load from Supabase and messaging functions properly.
